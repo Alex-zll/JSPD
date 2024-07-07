@@ -5,6 +5,7 @@
 #include <queue>
 #include <utility>
 #include <iostream>
+#include <algorithm>
 
 using namespace std;
 
@@ -36,6 +37,27 @@ namespace jsdp {
 				remCaps[didx] = dsks[didx].capcity;
 			}
 
+			// 给Dsize更高的任务优先分配高性能Disk
+			tasks tmp_tks = tks;
+			sort(tmp_tks.begin(), tmp_tks.end(), [](task tk1, task tk2){
+				return tk1.Dsize > tk2.Dsize;
+			});
+			for (int idx = 0; idx < l; ++idx) {
+				JobId j1 = tmp_tks[idx].jid;
+				int Dsize = tmp_tks[idx].Dsize;
+				DiskId maxDsk = -1;
+				int maxspd = 0;
+				// 这里可以添加一个判断条件
+				for (DiskId didx = 0; didx < dsks.size(); ++didx) {
+					if (remCaps[didx] > Dsize && dsks[didx].IOspeed > maxspd) {
+						maxspd = dsks[didx].IOspeed;
+						maxDsk = didx;
+					}
+				}
+				remCaps[maxDsk] -= Dsize;
+				assignD[j1] = maxDsk;
+			}
+
 			//构造初始解
 			unordered_map<int, vector<JobId>> data_map; //由数据依赖和环境依赖确定的顺序 
 			vector<int> data_inD(l, 0), vis(l, 0), env_inD(l, 0);
@@ -48,7 +70,7 @@ namespace jsdp {
 			}
 
 			queue<JobId> myQ;
-			for (int j = 0; j < dat_dep.size(); ++j) {
+			for (int j = 0; j < l; ++j) {
 				if (data_inD[j] == 0 && env_inD[j] == 0)
 					myQ.push(j);
 			}
@@ -92,9 +114,18 @@ namespace jsdp {
 			//3、依次按照顺序来确定性能更优的disk和machine
 			for (int idx = 0; idx < data_map.size(); idx++) {
 				vector<JobId> jList = data_map[idx + 1];
-				// 1、确定每个任务在当前情况下的最早开始时间
+				tasks tmp_tsks;
 				for (auto j1 = jList.begin(); j1 != jList.end(); ++j1) {
-					auto parL1 = par_env_dep[*j1], parL2 = par_dat_dep[*j1];
+					task tmp_tk = tks[*j1];
+					tmp_tsks.push_back(tmp_tk);
+				}
+				sort(tmp_tsks.begin(), tmp_tsks.end(), [](task tk1, task tk2) {
+					return tk1.Jsize > tk2.Jsize;
+					});
+				// 1、确定每个任务在当前情况下的最早开始时间
+				for (int idx = 0; idx < tmp_tsks.size(); ++idx) {
+					JobId j1 = tmp_tsks[idx].jid;
+					auto parL1 = par_env_dep[j1], parL2 = par_dat_dep[j1];
 					int strt = 0;
 
 					for (auto parj = parL1.begin(); parj != parL1.end(); ++parj) {
@@ -106,6 +137,7 @@ namespace jsdp {
 							if (tks[*parj].Jsize % mchns[assignM[*parj]].power != 0) exet += 1;
 							exet += tks[*parj].Jsize / mchns[assignM[*parj]].power;
 							fsh += exet;
+
 							if (fsh > strt) strt = fsh;
 						}
 					}
@@ -124,32 +156,20 @@ namespace jsdp {
 							wrt += tks[*parj].Dsize / dsks[assignD[*parj]].IOspeed;
 							fsh += exet;
 							fsh += wrt;
-							if (fsh > strt) strt = fsh;
-							readSpeed[*j1] += wrt;
-						}
-					}
-					start_time[*j1] = strt;
 
-					// 3、最后确定disk和machine的分配情况，其中任务的开始时间可能做小的改动
-					// disk的分配优先考虑速度
-					int Dsize = tks[*j1].Dsize;
-					DiskId maxDsk = -1;
-					int maxspd = 0;
-						
-					// 这里可以添加一个判断条件
-					for (DiskId didx = 0; didx < dsks.size(); ++didx) {
-						if (remCaps[didx] > Dsize && dsks[didx].IOspeed > maxspd) {
-							maxspd = dsks[didx].IOspeed;
-							maxDsk = didx;
+							if (fsh > strt) strt = fsh;
+							readSpeed[j1] += wrt;
 						}
 					}
-					remCaps[maxDsk] -= Dsize;
-					assignD[*j1] = maxDsk;
+					start_time[j1] = strt;
+
+					// 3、最后确定machine的分配情况，其中任务的开始时间可能做小的改动
 
 					// 分配机器时，需要确定机器当前是否空闲和需要等待多久的时间才能得到相对较理想的机器
 					// 如何确定当前机器是否空闲？
-					int mstrt = strt + readSpeed[*j1];
-					unordered_set<MachineId> Ms = tks[*j1].onM;
+					// ！！！！！！！！！！！！！！机器的分配关乎到任务的整个生命周期，而不是只关注第二个阶段！！！！！！！！！！！！！！！
+					int mstrt = strt;
+					unordered_set<MachineId> Ms = tks[j1].onM;
 					int maxpwr = 0, maxpwr2 = 0;
 					MachineId bestM1 = -1, bestM2 = -1;
 					int new_strt = 9999999;
@@ -161,33 +181,37 @@ namespace jsdp {
 						else if (exeing[*mch].first != -1) {
 							JobId ej = exeing[*mch].first;
 							int strtT = exeing[*mch].second, exeT = 0;
+							int rdSpd = readSpeed[ej], wrt = 0;
+							if (tks[ej].Dsize % dsks[assignD[ej]].IOspeed != 0) wrt += 1;
+							wrt += tks[ej].Dsize / dsks[assignD[ej]].IOspeed;
+
 							if (tks[ej].Jsize % mchns[*mch].power != 0) exeT += 1;
 							exeT += tks[ej].Jsize / mchns[*mch].power;
-							if (strtT + exeT <= mstrt) { //这里空闲
+							if (strtT + rdSpd + exeT + wrt <= mstrt) { //这里空闲
 								if (mchns[*mch].power > maxpwr) {
 									maxpwr = mchns[*mch].power;
 									bestM1 = *mch;
 								}
 							}
 							else { //当前不空闲
-								if (strtT + exeT < new_strt) { //找最早结束的机器
+								if (strtT + rdSpd + exeT + wrt < new_strt) { //找最早结束的机器
 									bestM2 = *mch;
-									new_strt = strtT + exeT;
+									new_strt = strtT + rdSpd + exeT + wrt;
 								}
 							}
 						}
 					}
 					if (bestM1 != -1) {
-						assignM[*j1] = bestM1;
-						exeing[bestM1].first = *j1;
+						assignM[j1] = bestM1;
+						exeing[bestM1].first = j1;
 						exeing[bestM1].second = mstrt;
 					}
 					else {
-						assignM[*j1] = bestM2;
-						exeing[bestM2].first = *j1;
+						assignM[j1] = bestM2;
+						exeing[bestM2].first = j1;
 						exeing[bestM2].second = new_strt;
-						strt = new_strt - readSpeed[*j1];
-						start_time[*j1] = strt;
+						strt = new_strt;
+						start_time[j1] = strt;
 					}
 				}
 			}
