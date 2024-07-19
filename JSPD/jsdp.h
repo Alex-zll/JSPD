@@ -16,6 +16,7 @@ namespace jsdp {
 		JobId jid;
 		int Jsize; //任务大小
 		int Dsize; //任务携带数据大小
+		int gen; //确定后代数量
 		std::unordered_set<int> onM; //在哪些机器上执行
 	};
 	using tasks = std::vector<task>; //tasks[i]需要与 jid对应

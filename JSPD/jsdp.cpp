@@ -19,6 +19,7 @@ namespace jsdp {
 		int rand(int lb, int ub) { return uniform_int_distribution<int>(lb, ub - 1)(pseudoRandNumGen); }
 		int rand(int ub) { return uniform_int_distribution<int>(0, ub - 1)(pseudoRandNumGen); }
 	public:
+		
 		void solveProblem(tasks tks, machines mchns, disks dsks, vector<std::unordered_set<JobId>> env_dep,
 			vector<std::unordered_set<JobId>> dat_dep) {
 			int l = tks.size(), n = mchns.size(), m = dsks.size();
@@ -38,9 +39,12 @@ namespace jsdp {
 			}
 
 			// 给Dsize更高的任务优先分配高性能Disk
+			for (int j = 0; j < l; ++j) {
+				tks[j].gen = dat_dep[j].size() + env_dep[j].size() + 1;
+			}
 			tasks tmp_tks = tks;
 			sort(tmp_tks.begin(), tmp_tks.end(), [](task tk1, task tk2){
-				return tk1.Dsize > tk2.Dsize;
+				return tk1.Dsize * tk1.gen > tk2.Dsize * tk2.gen;
 			});
 			for (int idx = 0; idx < l; ++idx) {
 				JobId j1 = tmp_tks[idx].jid;
@@ -120,7 +124,7 @@ namespace jsdp {
 					tmp_tsks.push_back(tmp_tk);
 				}
 				sort(tmp_tsks.begin(), tmp_tsks.end(), [](task tk1, task tk2) {
-					return tk1.Jsize > tk2.Jsize;
+					return tk1.Jsize * tk1.gen > tk2.Jsize * tk2.gen;
 					});
 				// 1、确定每个任务在当前情况下的最早开始时间
 				for (int idx = 0; idx < tmp_tsks.size(); ++idx) {
@@ -164,19 +168,31 @@ namespace jsdp {
 					start_time[j1] = strt;
 
 					// 3、最后确定machine的分配情况，其中任务的开始时间可能做小的改动
-
-					// 分配机器时，需要确定机器当前是否空闲和需要等待多久的时间才能得到相对较理想的机器
-					// 如何确定当前机器是否空闲？
-					// ！！！！！！！！！！！！！！机器的分配关乎到任务的整个生命周期，而不是只关注第二个阶段！！！！！！！！！！！！！！！
 					int mstrt = strt;
 					unordered_set<MachineId> Ms = tks[j1].onM;
-					int maxpwr = 0, maxpwr2 = 0;
+					//int maxpwr = 0, maxpwr2 = 0;
+					int fast_fnsh1 = 99999999, fast_fnsh2 = 999999999;
 					MachineId bestM1 = -1, bestM2 = -1;
 					int new_strt = 9999999;
 					for (auto mch = Ms.begin(); mch != Ms.end(); ++mch) {
-						if (exeing[*mch].first == -1 && mchns[*mch].power > maxpwr) { //没有任务在这个机器上执行
-							maxpwr = mchns[*mch].power;
-							bestM1 = *mch;
+						//if (exeing[*mch].first == -1 && mchns[*mch].power > maxpwr) { //没有任务在这个机器上执行
+						//	maxpwr = mchns[*mch].power;
+						//	bestM1 = *mch;
+						//}
+						int cur_fnshT = strt + readSpeed[j1];
+						int cur_exeT = 0, cur_wrtT = 0;
+						if (tks[j1].Jsize % mchns[*mch].power != 0) cur_exeT += 1;
+						cur_exeT += tks[j1].Jsize / mchns[*mch].power;
+
+						if (tks[j1].Dsize % dsks[assignD[j1]].IOspeed != 0) cur_wrtT += 1;
+						cur_wrtT = tks[j1].Dsize / dsks[assignD[j1]].IOspeed;
+						cur_fnshT += (cur_exeT + cur_wrtT);
+						if (exeing[*mch].first == -1) { //没有任务在这个机器上执行
+							if (cur_fnshT < fast_fnsh1) {
+								bestM1 = *mch;
+								fast_fnsh1 = cur_fnshT;
+							}
+							
 						}
 						else if (exeing[*mch].first != -1) {
 							JobId ej = exeing[*mch].first;
@@ -187,21 +203,34 @@ namespace jsdp {
 
 							if (tks[ej].Jsize % mchns[*mch].power != 0) exeT += 1;
 							exeT += tks[ej].Jsize / mchns[*mch].power;
-							if (strtT + rdSpd + exeT + wrt <= mstrt) { //这里空闲
-								if (mchns[*mch].power > maxpwr) {
+							int pfnsh = strtT + rdSpd + exeT + wrt;
+							if (pfnsh <= strt) { //这里空闲
+								/*if (mchns[*mch].power > maxpwr) {
 									maxpwr = mchns[*mch].power;
 									bestM1 = *mch;
+								}*/
+								if (cur_fnshT < fast_fnsh1) {
+									bestM1 = *mch;
+									fast_fnsh1 = cur_fnshT;
 								}
 							}
 							else { //当前不空闲
-								if (strtT + rdSpd + exeT + wrt < new_strt) { //找最早结束的机器
+								//if (strtT + rdSpd + exeT + wrt < new_strt) { //找最早结束的机器
+								//	bestM2 = *mch;
+								//	new_strt = strtT + rdSpd + exeT + wrt;
+								//}
+								new_strt = strtT + rdSpd + exeT + wrt;
+								cur_fnshT -= strt;
+								cur_fnshT += new_strt;
+								if (cur_fnshT < fast_fnsh2) {
 									bestM2 = *mch;
-									new_strt = strtT + rdSpd + exeT + wrt;
+									mstrt = new_strt;
+									fast_fnsh2 = cur_fnshT;
 								}
 							}
 						}
 					}
-					if (bestM1 != -1) {
+					/*if (bestM1 != -1) {
 						assignM[j1] = bestM1;
 						exeing[bestM1].first = j1;
 						exeing[bestM1].second = mstrt;
@@ -212,6 +241,17 @@ namespace jsdp {
 						exeing[bestM2].second = new_strt;
 						strt = new_strt;
 						start_time[j1] = strt;
+					}*/
+					if (fast_fnsh2 < fast_fnsh1) {
+						assignM[j1] = bestM2;
+						exeing[bestM2].first = j1;
+						exeing[bestM2].second = mstrt;
+						start_time[j1] = mstrt;
+					}
+					else {
+						assignM[j1] = bestM1;
+						exeing[bestM1].first = j1;
+						exeing[bestM1].second = strt;
 					}
 				}
 			}
